@@ -2,6 +2,8 @@
 
 #include <ATen/ATen.h>
 #include <ATen/native/quantized/affine_quantizer.h>
+#include <ATen/quantized/Quantizer.h>
+#include <c10/macros/Macros.h>
 
 namespace at {
 namespace native {
@@ -29,6 +31,41 @@ Tensor& quantized_copy_from_float_cpu_(Tensor& self, const Tensor& src) {
     }
   });
   return self;
+}
+
+static C10_ALWAYS_INLINE Tensor& copy_quantized_for_key_(
+    DispatchKey include_key, DispatchKey exclude_key, Tensor & self,
+    const Tensor & src, bool non_blocking)  {
+
+  TORCH_CHECK(self.is_quantized(), "Copying to non-quantized Tensor"
+                                   "is not allowed in this function");
+  if(src.is_quantized())  {
+    TORCH_CHECK(self.qscheme() == src.qscheme(),
+                "Quantized Copy only works with same qscheme");
+    TORCH_CHECK(self.scalar_type() == src.scalar_type());
+    set_quantizer_(self, src.quantizer());
+    c10::impl::IncludeDispatchKeyGuard include_quantized_guard(include_key);
+    c10::impl::ExcludeDispatchKeyGuard exclude_quantized_guard(exclude_key);
+    return self.copy_(src, non_blocking);  // redispatch!
+  }
+  else {
+    return quantized_copy_from_float_cpu_(self, src);
+  }
+}
+
+Tensor & copy_quantized_cpu_(Tensor &self, const Tensor &src, bool non_blocking) {
+  return copy_quantized_for_key_(DispatchKey::CPU,
+      DispatchKey::QuantizedCPU, self, src, non_blocking);
+}
+
+Tensor & copy_quantized_cuda_(Tensor &self, const Tensor &src, bool non_blocking) {
+  return copy_quantized_for_key_(DispatchKey::CUDA,
+      DispatchKey::QuantizedCUDA, self, src, non_blocking);
+}
+
+Tensor & copy_quantized_xpu_(Tensor &self, const Tensor &src, bool non_blocking) {
+  return copy_quantized_for_key_(DispatchKey::XPU,
+      DispatchKey::QuantizedXPU, self, src, non_blocking);
 }
 } // namespace native
 } // namespace at

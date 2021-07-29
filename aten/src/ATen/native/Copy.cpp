@@ -6,13 +6,13 @@
 #include <ATen/native/TensorIterator.h>
 #include <ATen/native/quantized/Copy.h>
 #include <ATen/native/vulkan/ops/Copy.h>
-#include <ATen/quantized/Quantizer.h>
 #include <ATen/vulkan/Context.h>
 #include <ATen/metal/Context.h>
 #include <ATen/MemoryOverlap.h>
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/Parallel.h>
 #include <torch/library.h>
+#include <c10/core/impl/LocalDispatchKeySet.h>
 
 #ifdef USE_FBGEMM
 #include <fbgemm/Fbgemm.h>
@@ -98,7 +98,7 @@ bool is_supported_device(Device device) {
 namespace at {
 namespace native {
 
-static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) {
+Tensor & copy_unnamed_(Tensor & self, const Tensor & src, bool non_blocking) {
   // TODO: this should be handled during dispatch, but that's missing...
   TORCH_CHECK(self.defined(), "self is undefined");
   TORCH_CHECK(src.defined(), "src is undefined");
@@ -152,13 +152,6 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
     }
   #endif
 
-  if (self.is_sparse() && src.is_sparse()) {
-    return at::copy_sparse_to_sparse_(self, src, non_blocking);
-  } else if (self.is_sparse() || src.is_sparse()) {
-    AT_ERROR("copy_() between dense and sparse Tensors is not implemented! Found self type = ",
-             self.toString(), " and src type = ", src.toString());
-  }
-
   if (self.is_same(src)) {
     return self;
   }
@@ -182,21 +175,6 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
   if (!is_supported_device(src.device()) || !is_supported_device(self.device())) {
     at::_copy_from(src, self, non_blocking);
     return self;
-  }
-
-  if (self.is_quantized() && !src.is_quantized()) {
-    return quantized_copy_from_float_cpu_(self, src);
-  }
-
-  if (self.is_quantized() && src.is_quantized()) {
-    TORCH_CHECK(self.qscheme() == src.qscheme(),
-                "Quantized Copy only works with same qscheme");
-    TORCH_CHECK(self.scalar_type() == src.scalar_type());
-    set_quantizer_(self, src.quantizer());
-  }
-
-  if (!self.is_quantized() && src.is_quantized()) {
-    TORCH_CHECK(false, "Copying from quantized Tensor to non-quantized Tensor is not allowed, please use dequantize to get a float Tensor from a quantized Tensor");
   }
 
   if (self.device().type() == at::kVulkan || src.device().type() == at::kVulkan) {
@@ -247,7 +225,8 @@ Tensor& copy_(Tensor& self, const Tensor& src, bool non_blocking) {
   auto maybe_outnames = namedinference::compute_broadcast_outnames(self, src);
   {
     NoNamesGuard guard;
-    copy_impl(self, src, non_blocking);
+    c10::impl::ExcludeDispatchKeyGuard named_dispatch_guard(DispatchKey::Named);
+    self.copy_(src, non_blocking); // redispatch!
   }
   namedinference::propagate_names_if_nonempty(self, maybe_outnames);
   return self;
